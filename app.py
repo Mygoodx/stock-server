@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import re
+import os
 from datetime import timedelta
 
 app = Flask(__name__)
@@ -114,14 +115,13 @@ def get_yahoo_data(ticker_symbol):
     try:
         stock = yf.Ticker(ticker_symbol)
         
-        # 1. 재무 데이터 (분기)
+        # 1. 재무 데이터
         financials = stock.quarterly_financials
         if financials.empty:
             print(f"No financial data for {ticker_symbol}")
             return None
         
-        # 2. 과거 주가 데이터 (분기별 PER 역산용)
-        # 최근 2년치 데이터를 가져와서 재무제표 날짜와 매칭
+        # 2. 과거 주가 데이터
         hist_price = stock.history(period="2y")
         
         df = financials.T
@@ -138,10 +138,13 @@ def get_yahoo_data(ticker_symbol):
             shares_outstanding = info.get('sharesOutstanding')
             current_per = info.get('trailingPE') or info.get('forwardPE') or 20.0
             current_psr = info.get('priceToSalesTrailing12Months') or 5.0
+            # [추가] 현재 주가 가져오기
+            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
         except:
             shares_outstanding = None
             current_per = 20.0
             current_psr = 5.0
+            current_price = None
 
         parsed_data = []
 
@@ -161,14 +164,12 @@ def get_yahoo_data(ticker_symbol):
             op = float(op) if op is not None else None
             eps = float(eps) if eps is not None else None
             
-            # --- 과거 실제 주가 및 PER 찾기 ---
+            # 과거 실제 주가 및 PER 찾기
             actual_price = None
             historical_per = None
             
             if not hist_price.empty:
-                # 재무제표 기준일(date)과 가장 가까운 거래일의 종가 찾기
                 try:
-                    # 기준일 포함 전후 3일 검색
                     target_dates = [date + timedelta(days=i) for i in range(-3, 3)]
                     for d in target_dates:
                         d_str = d.strftime('%Y-%m-%d')
@@ -181,15 +182,12 @@ def get_yahoo_data(ticker_symbol):
                 except:
                     actual_price = None
 
-            # 과거 PER 역산 (실제 주가 / (분기EPS * 4))
             if actual_price and eps and eps > 0:
                 historical_per = actual_price / (eps * 4)
-            # 적자 기업일 경우 PSR 역산 (실제 주가 / (분기SPS * 4))
             elif actual_price and rev and shares_outstanding:
                 sps = rev / shares_outstanding
-                historical_per = actual_price / (sps * 4) # 여기서는 변수명을 historical_per로 쓰지만 실제론 PSR
+                historical_per = actual_price / (sps * 4) # PSR
             
-            # 실제 PER/PSR이 있으면 그것을 사용, 없으면 현재 PER/PSR 사용
             applied_multiple = historical_per if historical_per else (current_per if (eps and eps > 0) else current_psr)
 
             parsed_data.append({
@@ -205,7 +203,7 @@ def get_yahoo_data(ticker_symbol):
             
         if not parsed_data: return None
 
-        # --- 미래 예측 로직 ---
+        # 미래 예측 로직
         pdf = pd.DataFrame(parsed_data)
         pdf = pdf.ffill().bfill()
         
@@ -214,29 +212,25 @@ def get_yahoo_data(ticker_symbol):
             if col in pdf.columns:
                 pdf[col] = pd.to_numeric(pdf[col], errors='coerce')
         
-        # 성장률 계산
         growth_rates = pdf[numeric_cols].pct_change(fill_method=None).mean().fillna(0)
-        
         last = pdf.iloc[-1]
         
         pred_revenue = last['revenue'] * (1 + growth_rates['revenue']) if pd.notna(last['revenue']) else None
         pred_eps = last['eps'] * (1 + growth_rates['eps']) if pd.notna(last['eps']) else None
         pred_op_income = last['op_income'] * (1 + growth_rates['op_income']) if pd.notna(last['op_income']) else None
         
-        # [수정] 직전 분기의 실제 PER/PSR을 초기 예측 멀티플로 사용
+        # 직전 분기 멀티플 유지
         last_hist = parsed_data[-1]
-        pred_per = last_hist['per'] # 직전 분기 멀티플
+        pred_per = last_hist['per']
         
         pred_price = None
         method = "PER"
         
         if pred_eps is not None:
             if pred_eps > 0:
-                # 흑자일 때: PER 방식
                 pred_price = pred_eps * 4 * pred_per
                 method = "PER"
             elif pred_revenue is not None and shares_outstanding:
-                 # 적자일 때: PSR 방식 (직전 분기도 적자였다면 pred_per는 PSR값일 것임)
                  sps = pred_revenue / shares_outstanding
                  pred_price = sps * 4 * pred_per
                  method = "PSR"
@@ -255,7 +249,11 @@ def get_yahoo_data(ticker_symbol):
         return {
             'history': parsed_data,
             'prediction': prediction,
-            'info': {'shares': shares_outstanding, 'currency': 'USD'}
+            'info': {
+                'shares': shares_outstanding, 
+                'currency': 'USD',
+                'current_price': current_price # [추가] 현재 주가
+            }
         }
 
     except Exception as e:
@@ -298,5 +296,6 @@ def analyze():
     })
 
 if __name__ == '__main__':
-    print("=== US Stock Server (Last Q Multiple Pred) Started ===")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"=== US Stock Server Started on Port {port} ===")
+    app.run(host='0.0.0.0', port=port, debug=True)
