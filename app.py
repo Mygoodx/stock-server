@@ -212,14 +212,16 @@ def get_yahoo_data(ticker_symbol):
             if col in pdf.columns:
                 pdf[col] = pd.to_numeric(pdf[col], errors='coerce')
         
+        # 성장률 계산
         growth_rates = pdf[numeric_cols].pct_change(fill_method=None).mean().fillna(0)
         last = pdf.iloc[-1]
         
         pred_revenue = last['revenue'] * (1 + growth_rates['revenue']) if pd.notna(last['revenue']) else None
         pred_eps = last['eps'] * (1 + growth_rates['eps']) if pd.notna(last['eps']) else None
+        # [추가] 영업이익 예측 계산
         pred_op_income = last['op_income'] * (1 + growth_rates['op_income']) if pd.notna(last['op_income']) else None
         
-        # 직전 분기 멀티플 유지
+        # [수정] 직전 분기의 실제 PER/PSR을 초기 예측 멀티플로 사용
         last_hist = parsed_data[-1]
         pred_per = last_hist['per']
         
@@ -228,9 +230,11 @@ def get_yahoo_data(ticker_symbol):
         
         if pred_eps is not None:
             if pred_eps > 0:
+                # 흑자일 때: PER 방식
                 pred_price = pred_eps * 4 * pred_per
                 method = "PER"
             elif pred_revenue is not None and shares_outstanding:
+                 # 적자일 때: PSR 방식 (직전 분기도 적자였다면 pred_per는 PSR값일 것임)
                  sps = pred_revenue / shares_outstanding
                  pred_price = sps * 4 * pred_per
                  method = "PSR"
@@ -238,10 +242,10 @@ def get_yahoo_data(ticker_symbol):
         prediction = {
             'period': 'Next Q (Pred)',
             'revenue': round(pred_revenue) if pred_revenue else None,
-            'op_income': round(pred_op_income) if pred_op_income else None,
+            'op_income': round(pred_op_income) if pred_op_income else None, # [추가] 영업이익
             'eps': round(pred_eps, 2) if pred_eps else None,
             'per': round(pred_per, 2),
-            'calc_price': round(pred_price, 2) if pred_price else None,
+            'calc_price': round(pred_price, 2) if pred_price else None, # 계산된 예측 주가 그대로 사용
             'is_actual': False,
             'method': method
         }
